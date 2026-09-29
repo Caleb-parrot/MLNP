@@ -9,7 +9,7 @@ pink dot is an extra life.
 Eyes run home and sit out before hunting again. Clear the maze, or lose the
 last life.
 
-Built with [Wails](https://wails.io/) and [Pixi.js](https://pixijs.com/).
+Built with [Wails](https://wails.io/). The maze is drawn on a canvas.
 Ghost brains live in `scripts/*.lua` and hot-reload while a `scripts/`
 directory is next to the working copy. The binary also embeds those scripts,
 so a menu launch does not need them on disk.

@@ -33,9 +33,11 @@ func main() {
 		OnStartup:        engine.Startup,
 		OnShutdown:       engine.Shutdown,
 		Linux: &linux.Options{
-			ProgramName:      "munchenleopard",
-			Icon:             windowIcon,
-			WebviewGpuPolicy: linux.WebviewGpuPolicyOnDemand,
+			ProgramName: "munchenleopard",
+			Icon:        windowIcon,
+			// The maze is a 2D canvas. Leaving the GPU on made WebKit keep a
+			// WebGL context around for Pixi, which is what used the memory.
+			WebviewGpuPolicy: linux.WebviewGpuPolicyNever,
 		},
 		Bind: []interface{}{
 			engine,
