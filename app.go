@@ -2,9 +2,8 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -12,9 +11,14 @@ import (
 
 // GameState is the snapshot emitted to the frontend on every state change.
 type GameState struct {
-	Score    int  `json:"Score"`
-	Lives    int  `json:"Lives"`
-	GameOver bool `json:"GameOver"`
+	Score    int   `json:"Score"`
+	Lives    int   `json:"Lives"`
+	GameOver bool  `json:"GameOver"`
+	Won      bool  `json:"Won"`
+	Swift    bool  `json:"Swift"`
+	Frozen   bool  `json:"Frozen"`
+	SwiftMS  int64 `json:"SwiftMS"`
+	FrozenMS int64 `json:"FrozenMS"`
 }
 
 // PlayerUpdate is emitted after each successful MovePlayer call.
@@ -37,15 +41,21 @@ type GameEngine struct {
 
 	updateCh chan GhostUpdate
 
-	mu        sync.RWMutex
-	pacX      int
-	pacY      int
-	pellets   [][]int8 // 0=pellet 1=wall 2=eaten 3=power-pellet-eaten
-	score     int
-	lives     int
-	gameOver  bool
-	ghosts    map[string]*Ghost
-	ghostCmds map[string]chan<- GhostCommand // send-end of each ghost's commandCh
+	mu          sync.RWMutex
+	pacX        int
+	pacY        int
+	dir         int
+	pellets     [][]int8 // 0=pellet 1=wall 2=eaten 3=power-pellet-eaten
+	score       int
+	lives       int
+	gameOver    bool
+	won         bool
+	invulnUntil time.Time
+	swiftUntil  time.Time
+	freezeUntil time.Time
+	ghosts      map[string]*Ghost
+	ghostPos    map[string]GhostUpdate
+	ghostCmds   map[string]chan<- GhostCommand // send-end of each ghost's commandCh
 
 	lua *LuaManager
 
@@ -56,18 +66,31 @@ type GameEngine struct {
 const (
 	playerSpawnX = 14
 	playerSpawnY = 23
+	lifeMercy    = 1500 * time.Millisecond
+	swiftLength  = 5 * time.Second
+	freezeLength = 4 * time.Second
+	maxLives     = 5
+
+	cellPellet int8 = 0
+	cellWall   int8 = 1
+	cellEaten  int8 = 2
+	cellScare  int8 = 4
+	cellSwift  int8 = 5
+	cellFreeze int8 = 6
+	cellLife   int8 = 7
 )
 
-var powerPellets = [][2]int{{2, 2}, {25, 2}, {2, 28}, {25, 28}}
+// freezeUntilNano is what the ghost goroutines read, so they do not take the
+// engine lock on every tick.
+var freezeUntilNano atomic.Int64
 
-func isPowerPellet(x, y int) bool {
-	for _, p := range powerPellets {
-		if p[0] == x && p[1] == y {
-			return true
-		}
-	}
-	return false
+var scarePellets = [][2]int{
+	{2, 2}, {25, 2}, {2, 28}, {25, 28},
+	{14, 6}, {14, 21}, {6, 15}, {21, 15},
 }
+var swiftPellets = [][2]int{{1, 6}, {26, 6}, {1, 23}, {26, 23}}
+var freezePellets = [][2]int{{8, 11}, {19, 11}, {14, 15}}
+var lifePellets = [][2]int{{14, 2}, {14, 26}}
 
 func buildPellets() [][]int8 {
 	grid := make([][]int8, mazeRows)
@@ -75,10 +98,19 @@ func buildPellets() [][]int8 {
 		grid[y] = make([]int8, mazeCols)
 		for x := 0; x < mazeCols; x++ {
 			if mazeWalls[y][x] {
-				grid[y][x] = 1
+				grid[y][x] = cellWall
 			}
 		}
 	}
+	place := func(list [][2]int, kind int8) {
+		for _, p := range list {
+			grid[p[1]][p[0]] = kind
+		}
+	}
+	place(scarePellets, cellScare)
+	place(swiftPellets, cellSwift)
+	place(freezePellets, cellFreeze)
+	place(lifePellets, cellLife)
 	return grid
 }
 
@@ -86,19 +118,20 @@ func NewGameEngine() *GameEngine {
 	lm := NewLuaManager()
 
 	// Load scripts; log but don't crash on missing files so the game still runs
-	// with fallback Go AI if scripts are absent.
+	// with fallback Go AI if scripts are absent. Disk copies win so they can be
+	// hot-reloaded; otherwise the copy embedded in the binary is used.
 	if err := lm.LoadScript("normal", "scripts/ghost_normal.lua"); err != nil {
-		fmt.Println("warning:", err)
+		println("warning:", err.Error())
 	}
 	if err := lm.LoadScript("scared", "scripts/ghost_scared.lua"); err != nil {
-		fmt.Println("warning:", err)
+		println("warning:", err.Error())
 	}
-
-	lm.WatchScripts("scripts")
+	lm.SetPlayerPosition(playerSpawnX, playerSpawnY)
 
 	return &GameEngine{
 		updateCh:  make(chan GhostUpdate, 32),
 		ghosts:    make(map[string]*Ghost),
+		ghostPos:  make(map[string]GhostUpdate),
 		ghostCmds: make(map[string]chan<- GhostCommand),
 		pacX:      playerSpawnX,
 		pacY:      playerSpawnY,
@@ -115,30 +148,45 @@ func (e *GameEngine) Startup(ctx context.Context) {
 	e.ctx = ctx
 	loopCtx, cancel := context.WithCancel(ctx)
 	e.cancel = cancel
+	e.lua.WatchScripts(loopCtx, "scripts")
 
 	spawns := []struct {
-		ID   string
-		X, Y int
+		ID    string
+		X, Y  int
+		Delay time.Duration
 	}{
-		{"Spot", 13, 11},
-		{"Tracker", 14, 11},
-		{"Shadow", 15, 11},
+		{"Spot", 13, 11, 2 * time.Second},
+		{"Tracker", 14, 11, 8 * time.Second},
+		{"Shadow", 15, 11, 15 * time.Second},
 	}
+	e.mu.Lock()
+	now := time.Now()
 	for _, s := range spawns {
-		cmdCh := make(chan GhostCommand, 4)
+		cmdCh := make(chan GhostCommand, 8)
+		st := Dormant
+		if s.Delay == 0 {
+			st = Normal
+		}
 		g := &Ghost{
-			ID:        s.ID,
-			X:         s.X,
-			Y:         s.Y,
-			Speed:     150 * time.Millisecond,
-			updateCh:  e.updateCh,
-			commandCh: cmdCh,
-			lua:       e.lua,
+			ID:           s.ID,
+			X:            s.X,
+			Y:            s.Y,
+			HomeX:        s.X,
+			HomeY:        s.Y,
+			State:        st,
+			Speed:        normalSpeed,
+			releaseAt:    now.Add(s.Delay),
+			releaseDelay: s.Delay,
+			updateCh:     e.updateCh,
+			commandCh:    cmdCh,
+			lua:          e.lua,
 		}
 		e.ghosts[g.ID] = g
 		e.ghostCmds[g.ID] = cmdCh
+		e.ghostPos[g.ID] = GhostUpdate{ID: g.ID, X: g.X, Y: g.Y, State: st}
 		go g.Run(loopCtx)
 	}
+	e.mu.Unlock()
 
 	e.loopWG.Add(1)
 	go e.runLoop(loopCtx)
@@ -149,6 +197,9 @@ func (e *GameEngine) Shutdown(ctx context.Context) {
 		e.cancel()
 	}
 	e.loopWG.Wait()
+	if e.lua != nil {
+		e.lua.Close()
+	}
 }
 
 // runLoop fans ghost updates out to the frontend and checks ghost-player
@@ -162,68 +213,137 @@ func (e *GameEngine) runLoop(ctx context.Context) {
 			return
 
 		case update := <-e.updateCh:
-			runtime.EventsEmit(e.ctx, "ghost:update", update)
+			e.emit("ghost:update", update)
 			e.checkGhostCollision(update)
 		}
 	}
+}
+
+func (e *GameEngine) emit(event string, data ...interface{}) {
+	if e.ctx == nil || e.ctx.Value("events") == nil {
+		return
+	}
+	runtime.EventsEmit(e.ctx, event, data...)
 }
 
 // checkGhostCollision is called after every ghost update. Must not hold e.mu
 // while calling back into ghost command channels to avoid deadlock.
 func (e *GameEngine) checkGhostCollision(update GhostUpdate) {
 	e.mu.Lock()
-	if e.gameOver {
+	e.ghostPos[update.ID] = update
+	if e.gameOver || e.won || update.X != e.pacX || update.Y != e.pacY {
 		e.mu.Unlock()
 		return
 	}
-	if update.X != e.pacX || update.Y != e.pacY {
-		e.mu.Unlock()
-		return
+	eatID := e.applyContactLocked(update)
+	state := e.emitState()
+	player := PlayerUpdate{X: e.pacX, Y: e.pacY, Dir: e.dir}
+	e.mu.Unlock()
+
+	e.emit("player:update", player)
+	e.emit("game:state", state)
+	if eatID != "" {
+		e.sendGhost(eatID, GhostCommand{Type: "eat"})
 	}
-	switch update.State {
+}
+
+// applyContactLocked resolves one ghost occupying the player's tile.
+// Caller must hold e.mu. Returns the id of a ghost that should be eaten.
+func (e *GameEngine) applyContactLocked(g GhostUpdate) string {
+	switch g.State {
 	case Scared:
 		e.score += 200
-		state := e.emitState()
-		e.mu.Unlock()
-		runtime.EventsEmit(e.ctx, "game:state", state)
-		// Eat the ghost outside the lock.
-		if ch, ok := e.ghostCmds[update.ID]; ok {
-			select {
-			case ch <- GhostCommand{Type: "eat"}:
-			default:
-			}
-		}
+		g.State = Eaten
+		e.ghostPos[g.ID] = g
+		return g.ID
 	case Normal:
+		if time.Now().Before(e.invulnUntil) {
+			return ""
+		}
 		e.loseLifeLocked()
+		return ""
 	default:
-		e.mu.Unlock()
+		// Dormant crests are still in the pen, and eyes are already eaten.
+		return ""
 	}
 }
 
 // loseLifeLocked decrements lives and handles respawn or game-over.
-// Caller must hold e.mu; this method releases it.
+// Caller must hold e.mu.
 func (e *GameEngine) loseLifeLocked() {
 	e.lives--
 	if e.lives <= 0 {
 		e.gameOver = true
-		state := e.emitState()
-		e.mu.Unlock()
-		runtime.EventsEmit(e.ctx, "game:state", state)
 		return
 	}
 	e.pacX, e.pacY = playerSpawnX, playerSpawnY
+	e.dir = 0
+	e.invulnUntil = time.Now().Add(lifeMercy)
 	e.lua.SetPlayerPosition(e.pacX, e.pacY)
-	state := e.emitState()
-	update := PlayerUpdate{X: e.pacX, Y: e.pacY, Dir: 0}
-	e.mu.Unlock()
-	runtime.EventsEmit(e.ctx, "player:update", update)
-	runtime.EventsEmit(e.ctx, "game:state", state)
 }
 
 // emitState snapshots the current score/lives/gameOver for event emission.
 // Caller must hold e.mu.
+func remainMS(until time.Time) int64 {
+	if until.IsZero() {
+		return 0
+	}
+	d := time.Until(until)
+	if d <= 0 {
+		return 0
+	}
+	return d.Milliseconds()
+}
+
 func (e *GameEngine) emitState() GameState {
-	return GameState{Score: e.score, Lives: e.lives, GameOver: e.gameOver}
+	return GameState{
+		Score:    e.score,
+		Lives:    e.lives,
+		GameOver: e.gameOver,
+		Won:      e.won,
+		Swift:    time.Now().Before(e.swiftUntil),
+		Frozen:   time.Now().Before(e.freezeUntil),
+		SwiftMS:  remainMS(e.swiftUntil),
+		FrozenMS: remainMS(e.freezeUntil),
+	}
+}
+
+func (e *GameEngine) pelletsLeftLocked() int {
+	n := 0
+	for y := range e.pellets {
+		for x := range e.pellets[y] {
+			if e.pellets[y][x] == cellPellet {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+func (e *GameEngine) ghostAtLocked(x, y int) (GhostUpdate, bool) {
+	for _, g := range e.ghostPos {
+		if g.X == x && g.Y == y {
+			return g, true
+		}
+	}
+	return GhostUpdate{}, false
+}
+
+func (e *GameEngine) sendGhost(id string, cmd GhostCommand) {
+	ch, ok := e.ghostCmds[id]
+	if !ok {
+		return
+	}
+	select {
+	case ch <- cmd:
+	default:
+	}
+}
+
+func (e *GameEngine) broadcast(cmd GhostCommand) {
+	for id := range e.ghostCmds {
+		e.sendGhost(id, cmd)
+	}
 }
 
 // --- Bound methods callable from the frontend ---
@@ -235,13 +355,13 @@ func (e *GameEngine) emitState() GameState {
 func (e *GameEngine) MovePlayer(dir string) bool {
 	e.mu.Lock()
 
-	if e.gameOver {
+	if e.gameOver || e.won {
 		e.mu.Unlock()
 		return false
 	}
 
 	nx, ny := e.pacX, e.pacY
-	facing := 0
+	facing := e.dir
 	switch dir {
 	case "up":
 		ny--
@@ -266,31 +386,58 @@ func (e *GameEngine) MovePlayer(dir string) bool {
 	}
 
 	e.pacX, e.pacY = nx, ny
+	e.dir = facing
 	e.lua.SetPlayerPosition(nx, ny)
 
-	// Pellet collection.
 	var scarePellet bool
-	if e.pellets[ny][nx] == 0 {
-		if isPowerPellet(nx, ny) {
-			e.pellets[ny][nx] = 3
-			e.score += 50
-			scarePellet = true
-		} else {
-			e.pellets[ny][nx] = 2
-			e.score += 10
+	switch e.pellets[ny][nx] {
+	case cellPellet:
+		e.pellets[ny][nx] = cellEaten
+		e.score += 10
+	case cellScare:
+		e.pellets[ny][nx] = cellEaten
+		e.score += 50
+		scarePellet = true
+	case cellSwift:
+		e.pellets[ny][nx] = cellEaten
+		e.score += 30
+		e.swiftUntil = time.Now().Add(swiftLength)
+	case cellFreeze:
+		e.pellets[ny][nx] = cellEaten
+		e.score += 30
+		e.freezeUntil = time.Now().Add(freezeLength)
+		freezeUntilNano.Store(e.freezeUntil.UnixNano())
+	case cellLife:
+		e.pellets[ny][nx] = cellEaten
+		e.score += 100
+		if e.lives < maxLives {
+			e.lives++
+		}
+	}
+	if e.pelletsLeftLocked() == 0 {
+		e.won = true
+	}
+
+	var eatID string
+	if !e.won {
+		if g, ok := e.ghostAtLocked(nx, ny); ok {
+			eatID = e.applyContactLocked(g)
 		}
 	}
 
 	stateSnap := e.emitState()
-	playerSnap := PlayerUpdate{X: nx, Y: ny, Dir: facing}
+	playerSnap := PlayerUpdate{X: e.pacX, Y: e.pacY, Dir: e.dir}
 	pelletSnap := e.copyPelletsLocked()
 	e.mu.Unlock()
 
-	runtime.EventsEmit(e.ctx, "player:update", playerSnap)
-	runtime.EventsEmit(e.ctx, "game:state", stateSnap)
-	runtime.EventsEmit(e.ctx, "pellet:update", pelletSnap)
-	if scarePellet {
-		e.scareOne()
+	e.emit("player:update", playerSnap)
+	e.emit("game:state", stateSnap)
+	e.emit("pellet:update", pelletSnap)
+	if eatID != "" {
+		e.sendGhost(eatID, GhostCommand{Type: "eat"})
+	}
+	if scarePellet && !stateSnap.Won && !stateSnap.GameOver {
+		e.scareAll()
 	}
 	return true
 }
@@ -306,50 +453,101 @@ func (e *GameEngine) GetState() GameState {
 func (e *GameEngine) GetPlayerPosition() PlayerUpdate {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return PlayerUpdate{X: e.pacX, Y: e.pacY, Dir: 0}
+	return PlayerUpdate{X: e.pacX, Y: e.pacY, Dir: e.dir}
 }
 
 // GetPellets returns the full pellet grid for initial frontend sync.
-// Values: 0=pellet present, 1=wall, 2=normal pellet eaten, 3=power pellet eaten.
-func (e *GameEngine) GetPellets() [][]int8 {
+// Values: 0=pellet, 1=wall, 2=eaten, 4=scare, 5=swift, 6=freeze, 7=life.
+func (e *GameEngine) GetPellets() [][]int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.copyPelletsLocked()
 }
 
-// copyPelletsLocked copies the pellet grid. Caller must hold at least a read lock.
-func (e *GameEngine) copyPelletsLocked() [][]int8 {
-	out := make([][]int8, len(e.pellets))
+// GetGhosts returns the latest ghost tiles for the first paint, before any
+// ghost:update event has been delivered.
+func (e *GameEngine) GetGhosts() []GhostUpdate {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]GhostUpdate, 0, len(e.ghostPos))
+	for _, g := range e.ghostPos {
+		out = append(out, g)
+	}
+	return out
+}
+
+// copyPelletsLocked copies the pellet grid as plain ints. A [][]int8 is easy
+// for a JSON binding to treat as raw bytes, and then the dots never draw.
+// Caller must hold at least a read lock.
+func (e *GameEngine) copyPelletsLocked() [][]int {
+	out := make([][]int, len(e.pellets))
 	for i, row := range e.pellets {
-		c := make([]int8, len(row))
-		copy(c, row)
+		c := make([]int, len(row))
+		for j, v := range row {
+			c[j] = int(v)
+		}
 		out[i] = c
 	}
 	return out
 }
 
-// scareOne picks a random normal ghost and scares it.
-func (e *GameEngine) scareOne() {
-	ids := make([]string, 0, len(e.ghostCmds))
-	for id := range e.ghostCmds {
-		ids = append(ids, id)
+// scareAll turns every crest that is still on the board blue and fleeing.
+// Eyes that are already eaten stay eyes.
+func (e *GameEngine) scareAll() {
+	e.mu.Lock()
+	updates := make([]GhostUpdate, 0, len(e.ghostPos))
+	for id, g := range e.ghostPos {
+		if g.State == Eaten {
+			continue
+		}
+		g.State = Scared
+		e.ghostPos[id] = g
+		updates = append(updates, g)
 	}
-	if len(ids) == 0 {
-		return
-	}
-	target := ids[rand.Intn(len(ids))]
-	select {
-	case e.ghostCmds[target] <- GhostCommand{Type: "scare"}:
-	default:
+	e.mu.Unlock()
+	for _, u := range updates {
+		e.sendGhost(u.ID, GhostCommand{Type: "scare"})
+		e.emit("ghost:update", u)
 	}
 }
 
-// ResetGhosts returns every ghost to normal state.
+// ResetGhosts returns every ghost to normal state without moving them.
 func (e *GameEngine) ResetGhosts() {
-	for _, ch := range e.ghostCmds {
-		select {
-		case ch <- GhostCommand{Type: "reset"}:
-		default:
+	e.broadcast(GhostCommand{Type: "reset"})
+}
+
+// Restart deals a fresh maze: pellets, lives, score, and ghost homes.
+func (e *GameEngine) Restart() {
+	e.mu.Lock()
+	e.pacX, e.pacY = playerSpawnX, playerSpawnY
+	e.dir = 0
+	e.score = 0
+	e.lives = 3
+	e.gameOver = false
+	e.won = false
+	e.invulnUntil = time.Time{}
+	e.swiftUntil = time.Time{}
+	e.freezeUntil = time.Time{}
+	freezeUntilNano.Store(0)
+	e.pellets = buildPellets()
+	e.lua.SetPlayerPosition(e.pacX, e.pacY)
+	for id, g := range e.ghostPos {
+		g.State = Normal
+		if home, ok := e.ghosts[id]; ok {
+			g.X, g.Y = home.HomeX, home.HomeY
+			if home.releaseDelay > 0 {
+				g.State = Dormant
+			}
 		}
+		e.ghostPos[id] = g
 	}
+	state := e.emitState()
+	player := PlayerUpdate{X: e.pacX, Y: e.pacY, Dir: 0}
+	pellets := e.copyPelletsLocked()
+	e.mu.Unlock()
+
+	e.emit("player:update", player)
+	e.emit("game:state", state)
+	e.emit("pellet:update", pellets)
+	e.broadcast(GhostCommand{Type: "respawn"})
 }

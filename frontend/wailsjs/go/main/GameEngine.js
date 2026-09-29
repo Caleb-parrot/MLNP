@@ -6,6 +6,10 @@ export function GetPellets() {
   return window['go']['main']['GameEngine']['GetPellets']();
 }
 
+export function GetGhosts() {
+  return window['go']['main']['GameEngine']['GetGhosts']();
+}
+
 export function GetPlayerPosition() {
   return window['go']['main']['GameEngine']['GetPlayerPosition']();
 }
@@ -20,4 +24,8 @@ export function MovePlayer(arg1) {
 
 export function ResetGhosts() {
   return window['go']['main']['GameEngine']['ResetGhosts']();
+}
+
+export function Restart() {
+  return window['go']['main']['GameEngine']['Restart']();
 }

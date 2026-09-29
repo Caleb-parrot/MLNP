@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function GetPellets():Promise<Array<any>>;
 
+export function GetGhosts():Promise<Array<any>>;
+
 export function GetPlayerPosition():Promise<main.PlayerUpdate>;
 
 export function GetState():Promise<main.GameState>;
@@ -11,3 +13,5 @@ export function GetState():Promise<main.GameState>;
 export function MovePlayer(arg1:string):Promise<boolean>;
 
 export function ResetGhosts():Promise<void>;
+
+export function Restart():Promise<void>;

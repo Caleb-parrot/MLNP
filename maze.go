@@ -54,3 +54,49 @@ func isWall(x, y int) bool {
 	}
 	return mazeWalls[y][x]
 }
+
+// nextOpenStep is the first step of a shortest path from (sx, sy) to (tx, ty).
+// open reports which tiles may be entered. The start tile itself does not
+// have to be open, so a ghost that no-clipped into a wall can still path out.
+func nextOpenStep(sx, sy, tx, ty int, open func(x, y int) bool) (nx, ny int, ok bool) {
+	if sx == tx && sy == ty {
+		return sx, sy, true
+	}
+	type pt struct{ x, y int }
+	q := []pt{{sx, sy}}
+	prev := make(map[pt]pt, mazeCols*mazeRows)
+	seen := map[pt]bool{{sx, sy}: true}
+	deltas := [...]pt{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
+	var found *pt
+	for len(q) > 0 && found == nil {
+		cur := q[0]
+		q = q[1:]
+		for _, d := range deltas {
+			n := pt{cur.x + d.x, cur.y + d.y}
+			if seen[n] || !open(n.x, n.y) {
+				continue
+			}
+			seen[n] = true
+			prev[n] = cur
+			if n.x == tx && n.y == ty {
+				found = &n
+				break
+			}
+			q = append(q, n)
+		}
+	}
+	if found == nil {
+		return 0, 0, false
+	}
+	cur := *found
+	for {
+		p, has := prev[cur]
+		if !has {
+			return 0, 0, false
+		}
+		if p.x == sx && p.y == sy {
+			return cur.x, cur.y, true
+		}
+		cur = p
+	}
+}

@@ -4,6 +4,11 @@ export namespace main {
 	    Score: number;
 	    Lives: number;
 	    GameOver: boolean;
+	    Won: boolean;
+	    Swift: boolean;
+	    Frozen: boolean;
+	    SwiftMS: number;
+	    FrozenMS: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new GameState(source);
@@ -14,6 +19,11 @@ export namespace main {
 	        this.Score = source["Score"];
 	        this.Lives = source["Lives"];
 	        this.GameOver = source["GameOver"];
+	        this.Won = source["Won"];
+	        this.Swift = source["Swift"];
+	        this.Frozen = source["Frozen"];
+	        this.SwiftMS = source["SwiftMS"];
+	        this.FrozenMS = source["FrozenMS"];
 	    }
 	}
 	export class PlayerUpdate {

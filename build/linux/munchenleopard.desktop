@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Munchen Leopard
+Comment=Heraldic maze chase
+Exec=/home/caleb/.local/bin/munchenleopard
+Icon=/home/caleb/.local/share/icons/munchenleopard.png
+Terminal=false
+Categories=Game;
+StartupNotify=true
+StartupWMClass=munchenleopard

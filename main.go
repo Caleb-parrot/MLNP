@@ -6,25 +6,37 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/linux"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
+//go:embed frontend/src/assets/sprites/playerRight.png
+var windowIcon []byte
+
 func main() {
-	// Create an instance of the app structure
 	engine := NewGameEngine()
 
+	// The maze is 672×784. This laptop's logical screen is 1280×800 with a
+	// 30px bar, so the window starts smaller and the canvas scales to fit.
 	err := wails.Run(&options.App{
-		Title:  "MunchenLeopard",
-		Width:  896,
-		Height: 992,
+		Title:     "Munchen Leopard",
+		Width:     700,
+		Height:    720,
+		MinWidth:  520,
+		MinHeight: 560,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		BackgroundColour: &options.RGBA{R: 0, G: 0, B: 0, A: 1},
+		BackgroundColour: &options.RGBA{R: 0, G: 0, B: 0, A: 255},
 		OnStartup:        engine.Startup,
 		OnShutdown:       engine.Shutdown,
+		Linux: &linux.Options{
+			ProgramName:      "munchenleopard",
+			Icon:             windowIcon,
+			WebviewGpuPolicy: linux.WebviewGpuPolicyOnDemand,
+		},
 		Bind: []interface{}{
 			engine,
 		},

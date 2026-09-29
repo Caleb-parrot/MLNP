@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +12,9 @@ import (
 	"github.com/fsnotify/fsnotify"
 	lua "github.com/yuin/gopher-lua"
 )
+
+//go:embed scripts/*.lua
+var embeddedScripts embed.FS
 
 // LuaManager owns a single Lua VM and exposes ghost-brain hooks to scripts.
 // All calls are serialised by mu; ghost goroutines must not hold their own
@@ -32,6 +37,10 @@ func NewLuaManager() *LuaManager {
 	lua.OpenMath(L)
 	lua.OpenTable(L)
 	lua.OpenString(L)
+	L.SetGlobal("is_wall", L.NewFunction(func(L *lua.LState) int {
+		L.Push(lua.LBool(isWall(L.ToInt(1), L.ToInt(2))))
+		return 1
+	}))
 	return &LuaManager{
 		L:           L,
 		scripts:     make(map[string]*lua.LFunction),
@@ -49,6 +58,13 @@ func (m *LuaManager) SetPlayerPosition(x, y int) {
 	m.mu.Lock()
 	m.pacX, m.pacY = x, y
 	m.mu.Unlock()
+}
+
+// PlayerPosition returns the last position handed to Lua.
+func (m *LuaManager) PlayerPosition() (int, int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pacX, m.pacY
 }
 
 // resolveScriptPath tries the given path as-is first, then relative to the
@@ -74,30 +90,46 @@ func (m *LuaManager) LoadScript(key, path string) error {
 	return m.loadScriptLocked(key, path)
 }
 
-// loadScriptLocked is the inner implementation; caller must hold m.mu.
+// loadScriptLocked reads path from disk, then from the embedded copy shipped
+// inside the binary. A disk hit is remembered so the file watcher can reload it.
+// Caller must hold m.mu.
 func (m *LuaManager) loadScriptLocked(key, path string) error {
-	path = resolveScriptPath(path)
-	src, err := os.ReadFile(path)
+	resolved := resolveScriptPath(path)
+	if src, err := os.ReadFile(resolved); err == nil {
+		return m.execScriptLocked(key, resolved, src)
+	}
+	src, err := embeddedScripts.ReadFile(filepath.ToSlash(path))
 	if err != nil {
 		return fmt.Errorf("lua: read %s: %w", path, err)
 	}
+	return m.execScriptLocked(key, "", src)
+}
+
+func (m *LuaManager) execScriptLocked(key, watchPath string, src []byte) error {
 	if err := m.L.DoString(string(src)); err != nil {
-		return fmt.Errorf("lua: exec %s: %w", path, err)
+		return fmt.Errorf("lua: exec %s: %w", key, err)
 	}
 	fn, ok := m.L.GetGlobal("think").(*lua.LFunction)
 	if !ok {
-		return fmt.Errorf("lua: %s must define a global function think(ghost_id, gx, gy, state, dt)", path)
+		return fmt.Errorf("lua: %s must define a global function think(ghost_id, gx, gy, state, dt)", key)
 	}
 	m.scripts[key] = fn
-	m.scriptPaths[key] = path
+	if watchPath != "" {
+		m.scriptPaths[key] = watchPath
+	}
 	return nil
 }
 
 // WatchScripts starts a goroutine that watches the scripts directory and
 // hot-reloads any .lua file that changes while the game is running.
-// The goroutine exits when ctx is done.
-func (m *LuaManager) WatchScripts(dir string) {
+// The goroutine exits when ctx is done. Missing directories are ignored so a
+// menu launch, which has no scripts folder beside the binary, stays quiet.
+func (m *LuaManager) WatchScripts(ctx context.Context, dir string) {
 	dir = resolveScriptPath(dir)
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Println("lua watcher: could not create:", err)
@@ -113,6 +145,8 @@ func (m *LuaManager) WatchScripts(dir string) {
 		defer watcher.Close()
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case event, ok := <-watcher.Events:
 				if !ok {
 					return
