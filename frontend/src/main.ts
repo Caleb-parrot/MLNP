@@ -1,10 +1,9 @@
 import './style.css';
 import { EventsOn } from '../wailsjs/runtime/runtime';
-import { GetGhosts, GetPellets, GetPlayerPosition, GetState, MovePlayer, Restart } from '../wailsjs/go/main/GameEngine';
+import { GetGhosts, GetPellets, GetPlayerPosition, GetState, GetWallSkin, MovePlayer, Restart } from '../wailsjs/go/main/GameEngine';
 
-import playerRightUrl from './assets/sprites/playerRight.png';
-import playerLeftUrl from './assets/sprites/playerLeft.png';
-import playerKindlUrl from './assets/sprites/playerAlternate.png';
+import playerUrl from './assets/sprites/player1.png';
+import tetrisUrl from './assets/sprites/tetris.png';
 import goldCatUrl from './assets/sprites/goldCat.png';
 import blueDragonUrl from './assets/sprites/blueDragon.png';
 import blackCatsUrl from './assets/sprites/blackCats.png';
@@ -18,30 +17,55 @@ const VIEW_H = ROWS * TILE + 40;
 // Sprites are stored at the scared-crest size and drawn smaller when calm.
 const SPRITE = 32;
 
-const MAZE_WALLS: boolean[][] = buildMazeWalls();
+// Walls arrive from Go as wallSkin. Until that loads, prediction stays put.
+let mazeWalls: boolean[][] = [];
 
-function buildMazeWalls(): boolean[][] {
-    const grid: boolean[][] = [];
-    for (let y = 0; y < ROWS; y++) {
-        const row: boolean[] = [];
-        for (let x = 0; x < COLS; x++) {
-            row.push(x === 0 || y === 0 || x === COLS - 1 || y === ROWS - 1);
-        }
-        grid.push(row);
-    }
-    const blocks: Array<[number, number, number, number]> = [
-        [3, 3, 5, 2], [10, 3, 8, 2], [22, 3, 3, 2],
-        [3, 8, 3, 5], [10, 8, 8, 2], [22, 8, 3, 5],
-        [3, 18, 3, 5], [10, 18, 8, 2], [22, 18, 3, 5],
-        [3, 27, 5, 2], [10, 27, 8, 2], [22, 27, 3, 2],
-    ];
-    for (const [x, y, w, h] of blocks) {
-        for (let dy = 0; dy < h; dy++)
-            for (let dx = 0; dx < w; dx++)
-                if (grid[y + dy]) grid[y + dy][x + dx] = true;
-    }
-    return grid;
-}
+// Crops of the solid cells in tetris.png. piece 1-7 is J L I O S Z T.
+type Crop = { x: number; y: number; w: number; h: number };
+const CROPS: Record<number, Record<string, Crop>> = {
+    1: {
+        '0,0': { x: 16, y: 16, w: 117, h: 118 },
+        '0,1': { x: 16, y: 134, w: 117, h: 118 },
+        '1,1': { x: 133, y: 134, w: 118, h: 118 },
+        '2,1': { x: 251, y: 134, w: 117, h: 118 },
+    },
+    2: {
+        '2,0': { x: 252, y: 268, w: 116, h: 116 },
+        '0,1': { x: 20, y: 384, w: 116, h: 116 },
+        '1,1': { x: 136, y: 384, w: 116, h: 116 },
+        '2,1': { x: 252, y: 384, w: 116, h: 116 },
+    },
+    3: {
+        '0,0': { x: 20, y: 516, w: 117, h: 116 },
+        '1,0': { x: 137, y: 516, w: 117, h: 116 },
+        '2,0': { x: 254, y: 516, w: 117, h: 116 },
+        '3,0': { x: 371, y: 516, w: 117, h: 116 },
+    },
+    4: {
+        '0,0': { x: 140, y: 648, w: 116, h: 116 },
+        '1,0': { x: 256, y: 648, w: 116, h: 116 },
+        '0,1': { x: 140, y: 764, w: 116, h: 116 },
+        '1,1': { x: 256, y: 764, w: 116, h: 116 },
+    },
+    5: {
+        '1,0': { x: 137, y: 900, w: 118, h: 116 },
+        '2,0': { x: 255, y: 900, w: 117, h: 116 },
+        '0,1': { x: 20, y: 1016, w: 117, h: 116 },
+        '1,1': { x: 137, y: 1016, w: 118, h: 116 },
+    },
+    6: {
+        '0,0': { x: 20, y: 1148, w: 117, h: 116 },
+        '1,0': { x: 137, y: 1148, w: 118, h: 116 },
+        '1,1': { x: 137, y: 1264, w: 118, h: 116 },
+        '2,1': { x: 255, y: 1264, w: 117, h: 116 },
+    },
+    7: {
+        '1,0': { x: 137, y: 1396, w: 118, h: 116 },
+        '0,1': { x: 20, y: 1512, w: 117, h: 116 },
+        '1,1': { x: 137, y: 1512, w: 118, h: 116 },
+        '2,1': { x: 255, y: 1512, w: 117, h: 116 },
+    },
+};
 
 type GhostUpdate = { ID: string; X: number; Y: number; State: number; Dir: number };
 type PlayerUpdate = { X: number; Y: number; Dir: number };
@@ -136,16 +160,16 @@ async function main() {
     window.addEventListener('resize', fitCanvas);
 
     const maze = makeCanvas(VIEW_W, ROWS * TILE);
-    paintMaze(context2d(maze, true));
+    const mazeCtx = context2d(maze, true);
     const pelletLayer = makeCanvas(VIEW_W, ROWS * TILE);
     const pelletCtx = context2d(pelletLayer);
     const scratch = makeCanvas(SPRITE, SPRITE);
     const scratchCtx = context2d(scratch);
+    scratchCtx.imageSmoothingEnabled = true;
 
-    const [playerRight, playerLeft, kindl, goldCat, blueDragon, blackCats] = await Promise.all([
-        loadKeyed(playerRightUrl),
-        loadKeyed(playerLeftUrl),
-        loadKeyed(playerKindlUrl),
+    const [playerImg, tetris, goldCat, blueDragon, blackCats] = await Promise.all([
+        loadKeyed(playerUrl),
+        loadImage(tetrisUrl),
         loadKeyed(goldCatUrl),
         loadKeyed(blueDragonUrl),
         loadKeyed(blackCatsUrl),
@@ -197,8 +221,8 @@ async function main() {
     }
 
     function drawPlayer() {
-        const img = powered ? kindl : (playerPos.Dir === 1 || playerPos.Dir === 2 ? playerLeft : playerRight);
-        blit(img, playerPos.X, playerPos.Y, TILE - 2, playerAlpha, '');
+        const leftish = playerPos.Dir === 1 || playerPos.Dir === 2;
+        blit(playerImg, playerPos.X, playerPos.Y, powered ? TILE + 4 : TILE - 2, playerAlpha, powered ? '#ffd700' : '', leftish);
     }
 
     function drawGhost(g: GhostUpdate) {
@@ -214,10 +238,10 @@ async function main() {
         }
         const scaredNow = state === 1;
         const dormant = state === 3;
-        blit(img, g.X, g.Y, scaredNow ? TILE + 6 : TILE - 2, dormant ? 0.4 : 1, scaredNow ? '#66eeff' : '');
+        blit(img, g.X, g.Y, scaredNow ? TILE + 6 : TILE - 2, dormant ? 0.4 : 1, scaredNow ? '#66eeff' : '', false);
     }
 
-    function blit(img: HTMLCanvasElement, x: number, y: number, size: number, alpha: number, tint: string) {
+    function blit(img: HTMLCanvasElement, x: number, y: number, size: number, alpha: number, tint: string, flip: boolean) {
         scratchCtx.clearRect(0, 0, SPRITE, SPRITE);
         scratchCtx.globalCompositeOperation = 'source-over';
         scratchCtx.globalAlpha = 1;
@@ -230,11 +254,13 @@ async function main() {
             scratchCtx.globalAlpha = 1;
             scratchCtx.globalCompositeOperation = 'source-over';
         }
-        const px = x * TILE + TILE / 2 - size / 2;
-        const py = y * TILE + TILE / 2 - size / 2;
+        const cx = x * TILE + TILE / 2;
+        const cy = y * TILE + TILE / 2;
         ctx.save();
         ctx.globalAlpha = alpha;
-        ctx.drawImage(scratch, 0, 0, size, size, px, py, size, size);
+        ctx.translate(cx, cy);
+        if (flip) ctx.scale(-1, 1);
+        ctx.drawImage(scratch, 0, 0, size, size, -size / 2, -size / 2, size, size);
         ctx.restore();
     }
 
@@ -363,11 +389,14 @@ async function main() {
         if (changed) requestDraw();
     }
 
-    const [initPlayer, initState, initPellets] = await Promise.all([
+    const [initPlayer, initState, initPellets, skin] = await Promise.all([
         GetPlayerPosition(),
         GetState(),
         GetPellets(),
+        GetWallSkin(),
     ]);
+    mazeWalls = (skin as number[][]).map((row) => row.map((v) => Number(v) !== 0));
+    paintMaze(mazeCtx, skin as number[][], tetris);
     confirmed = initPlayer;
     playerPos = initPlayer;
     applyGameState(initState);
@@ -470,7 +499,7 @@ async function main() {
         else if (dir === 'right') { x++; d = 0; }
         else return;
         if (y < 0 || y >= ROWS || x < 0 || x >= COLS) return;
-        if (MAZE_WALLS[y][x]) return;
+        if (!mazeWalls[y] || mazeWalls[y][x]) return;
         applyPlayerUpdate({ X: x, Y: y, Dir: d });
     }
 
@@ -567,15 +596,66 @@ async function main() {
     }
 }
 
-function paintMaze(g: CanvasRenderingContext2D) {
-    g.fillStyle = '#1a1aff';
-    g.strokeStyle = '#4444ff';
-    g.lineWidth = 1;
+function loadImage(url: string): Promise<HTMLImageElement> {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`image failed: ${url}`));
+        img.src = url;
+    });
+}
+
+const tileCache = new Map<number, HTMLCanvasElement>();
+
+function turnClockwise(src: HTMLCanvasElement): HTMLCanvasElement {
+    const dst = makeCanvas(TILE, TILE);
+    const g = dst.getContext('2d');
+    if (!g) return src;
+    g.translate(TILE, 0);
+    g.rotate(Math.PI / 2);
+    g.drawImage(src, 0, 0);
+    return dst;
+}
+
+function mazeTile(skin: number, sheet: HTMLImageElement): HTMLCanvasElement {
+    const hit = tileCache.get(skin);
+    if (hit) return hit;
+    let piece = skin >> 8;
+    let rot = (skin >> 4) & 3;
+    let sx = skin & 3;
+    let sy = (skin >> 2) & 3;
+    if (piece === 8) {
+        piece = 1;
+        sx = 1;
+        sy = 1;
+        rot = 0;
+    }
+    const crop = CROPS[piece]?.[`${sx},${sy}`];
+    const base = makeCanvas(TILE, TILE);
+    const bctx = base.getContext('2d');
+    if (!bctx) return base;
+    bctx.imageSmoothingEnabled = true;
+    if (crop) bctx.drawImage(sheet, crop.x, crop.y, crop.w, crop.h, 0, 0, TILE, TILE);
+    else {
+        bctx.fillStyle = '#1a1aff';
+        bctx.fillRect(0, 0, TILE, TILE);
+    }
+    let cur = base;
+    for (let i = 0; i < rot; i++) cur = turnClockwise(cur);
+    tileCache.set(skin, cur);
+    return cur;
+}
+
+function paintMaze(g: CanvasRenderingContext2D, skin: number[][], sheet: HTMLImageElement) {
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, VIEW_W, ROWS * TILE);
     for (let y = 0; y < ROWS; y++) {
+        const row = skin[y];
+        if (!row) continue;
         for (let x = 0; x < COLS; x++) {
-            if (!MAZE_WALLS[y][x]) continue;
-            g.fillRect(x * TILE, y * TILE, TILE, TILE);
-            g.strokeRect(x * TILE + 0.5, y * TILE + 0.5, TILE - 1, TILE - 1);
+            const v = Number(row[x]);
+            if (!v) continue;
+            g.drawImage(mazeTile(v, sheet), x * TILE, y * TILE);
         }
     }
 }

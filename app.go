@@ -85,7 +85,7 @@ const (
 var freezeUntilNano atomic.Int64
 
 var scarePellets = [][2]int{
-	{2, 2}, {25, 2}, {2, 28}, {25, 28},
+	{1, 2}, {25, 2}, {2, 28}, {25, 28},
 	{14, 6}, {14, 21}, {6, 15}, {21, 15},
 }
 var swiftPellets = [][2]int{{1, 6}, {26, 6}, {1, 23}, {26, 23}}
@@ -458,6 +458,11 @@ func (e *GameEngine) GetPlayerPosition() PlayerUpdate {
 
 // GetPellets returns the full pellet grid for initial frontend sync.
 // Values: 0=pellet, 1=wall, 2=eaten, 4=scare, 5=swift, 6=freeze, 7=life.
+// GetWallSkin is the tetromino paint for each tile. 0 is open.
+func (e *GameEngine) GetWallSkin() [][]int {
+	return wallSkin
+}
+
 func (e *GameEngine) GetPellets() [][]int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

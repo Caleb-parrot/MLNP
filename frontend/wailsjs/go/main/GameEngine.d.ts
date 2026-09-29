@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function GetPellets():Promise<Array<any>>;
 
+export function GetWallSkin():Promise<Array<any>>;
+
 export function GetGhosts():Promise<Array<any>>;
 
 export function GetPlayerPosition():Promise<main.PlayerUpdate>;

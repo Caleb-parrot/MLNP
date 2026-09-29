@@ -12,6 +12,38 @@ func newTestEngine() *GameEngine {
 	return e
 }
 
+func TestCorridorsConnect(t *testing.T) {
+	if isWall(playerSpawnX, playerSpawnY) {
+		t.Fatal("spawn is a wall")
+	}
+	for _, h := range [][2]int{{13, 11}, {14, 11}, {15, 11}} {
+		if isWall(h[0], h[1]) {
+			t.Fatalf("crest home is a wall at %d,%d", h[0], h[1])
+		}
+	}
+	seen := map[[2]int]bool{{playerSpawnX, playerSpawnY}: true}
+	q := [][2]int{{playerSpawnX, playerSpawnY}}
+	for len(q) > 0 {
+		p := q[0]
+		q = q[1:]
+		for _, d := range [][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+			n := [2]int{p[0] + d[0], p[1] + d[1]}
+			if seen[n] || isWall(n[0], n[1]) {
+				continue
+			}
+			seen[n] = true
+			q = append(q, n)
+		}
+	}
+	for y := 0; y < mazeRows; y++ {
+		for x := 0; x < mazeCols; x++ {
+			if !isWall(x, y) && !seen[[2]int{x, y}] {
+				t.Fatalf("unreachable open tile %d,%d", x, y)
+			}
+		}
+	}
+}
+
 func TestMoveIntoWallStaysPut(t *testing.T) {
 	e := newTestEngine()
 	e.pacX, e.pacY = 1, 1
@@ -33,12 +65,12 @@ func TestPelletAndPowerPellet(t *testing.T) {
 		t.Fatalf("score %d cell %d", e.score, e.pellets[1][2])
 	}
 
-	e.pacX, e.pacY = 3, 2
-	if !e.MovePlayer("left") {
+	e.pacX, e.pacY = 1, 1
+	if !e.MovePlayer("down") {
 		t.Fatal("blocked on the way to a power pellet")
 	}
-	if e.pellets[2][2] != cellEaten || e.score != 60 {
-		t.Fatalf("power score %d cell %d", e.score, e.pellets[2][2])
+	if e.pellets[2][1] != cellEaten || e.score != 60 {
+		t.Fatalf("power score %d cell %d", e.score, e.pellets[2][1])
 	}
 	if !e.emitState().Swift && e.ghostPos["Spot"].State != Scared && len(e.ghostPos) > 0 {
 		t.Fatal("scare did not register")
@@ -245,8 +277,8 @@ func TestGoldPelletScaresEveryCrest(t *testing.T) {
 	e.ghostPos["Spot"] = GhostUpdate{ID: "Spot", X: 13, Y: 11, State: Dormant}
 	e.ghostPos["Tracker"] = GhostUpdate{ID: "Tracker", X: 14, Y: 11, State: Normal}
 	e.ghostPos["Shadow"] = GhostUpdate{ID: "Shadow", X: 15, Y: 11, State: Eaten}
-	e.pacX, e.pacY = 3, 2
-	if !e.MovePlayer("left") {
+	e.pacX, e.pacY = 1, 1
+	if !e.MovePlayer("down") {
 		t.Fatal("blocked")
 	}
 	if e.ghostPos["Spot"].State != Scared || e.ghostPos["Tracker"].State != Scared {

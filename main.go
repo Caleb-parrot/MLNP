@@ -12,7 +12,7 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-//go:embed frontend/src/assets/sprites/playerRight.png
+//go:embed frontend/src/assets/sprites/player1.png
 var windowIcon []byte
 
 func main() {

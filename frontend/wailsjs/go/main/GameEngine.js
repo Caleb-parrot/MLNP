@@ -6,6 +6,10 @@ export function GetPellets() {
   return window['go']['main']['GameEngine']['GetPellets']();
 }
 
+export function GetWallSkin() {
+  return window['go']['main']['GameEngine']['GetWallSkin']();
+}
+
 export function GetGhosts() {
   return window['go']['main']['GameEngine']['GetGhosts']();
 }

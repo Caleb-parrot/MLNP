@@ -12,7 +12,7 @@ install -m 755 "$bin" "$HOME/.local/lib/munchenleopard/munchenleopard"
 install -m 755 "$root/build/linux/munchenleopard.sh" "$HOME/.local/bin/munchenleopard"
 install -m 644 "$root/build/linux/munchenleopard.desktop" "$HOME/.local/share/applications/munchenleopard.desktop"
 # Leopard crest, not the stock Wails mark.
-install -m 644 "$root/frontend/src/assets/sprites/playerRight.png" "$HOME/.local/share/icons/munchenleopard.png"
+install -m 644 "$root/frontend/src/assets/sprites/player1.png" "$HOME/.local/share/icons/munchenleopard.png"
 if command -v update-desktop-database >/dev/null; then
 	update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
 fi
